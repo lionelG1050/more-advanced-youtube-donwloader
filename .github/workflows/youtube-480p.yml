@@ -18,7 +18,7 @@ on:
         default: 'mp4 (video)'
 
       max_part_mb:
-        description: 'حداکثر حجم هر قسمت (MB) - 0 = خودکار ۱۸۰۰ مگابایت'
+        description: 'حداکثر حجم هر قسمت (MB) - 0 = خودکار'
         required: false
         type: string
         default: '90'
@@ -33,154 +33,155 @@ on:
         default: 'repository (push to repo)'
 
       release_tag:
-        description: '🏷️ نام تگ ریلیز (فقط در صورت انتخاب Release)'
+        description: '🏷️ نام تگ ریلیز'
         required: false
         type: string
         default: ''
 
 permissions:
   contents: write
+  packages: read
 
 jobs:
   youtube-download:
     runs-on: ubuntu-latest
 
-    # ✅ use your docker image
+    # ✅ GHCR Docker Image
     container:
       image: ghcr.io/lionelg1050/youtube-downloader:latest
 
     timeout-minutes: 45
 
     steps:
+      # ✅ FIXES "fatal: not in a git directory"
       - name: 📂 Checkout Repository
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: 🔗 Get Download Link
-        id: retrieve
+      # ✅ Download video/audio
+      - name: 📥 Download YouTube Media
+        id: download
+        shell: bash
         run: |
-          python3 << 'EOF'
-          import os, sys, time, re, requests
+          URL="${{ github.event.inputs.video_url }}"
+          FORMAT_INPUT="${{ github.event.inputs.output_format }}"
 
-          URL  = os.environ.get('INPUT_URL')
-          FMT  = os.environ.get('INPUT_FORMAT')
-
-          is_audio = FMT == 'mp3'
-          QUAL = '192kbps' if is_audio else '480p'
-
-          payload = {
-              "url": URL,
-              "os": "linux",
-              "output": {"type": "audio" if is_audio else "video", "format": FMT}
-          }
-          if is_audio:
-              payload["audio"] = {"bitrate": QUAL}
-          else:
-              payload["output"]["quality"] = QUAL
-
-          s = requests.Session()
-          s.headers.update({"User-Agent": "Mozilla/5.0"})
-          s.get("https://media.ytmp3.gg/")
-
-          resp = s.post("https://hub.ytconvert.org/api/download", json=payload, timeout=30)
-          resp.raise_for_status()
-          data = resp.json()
-
-          status_url = data.get('statusUrl')
-          title = data.get('title', 'video')
-
-          dl_url = None
-          for _ in range(150):
-              time.sleep(2)
-              r = s.get(status_url, timeout=20)
-              status = r.json()
-              if status.get('status') == 'completed':
-                  dl_url = status.get('downloadUrl')
-                  break
-              if status.get('status') == 'failed':
-                  print("::error::Server failed")
-                  sys.exit(1)
-
-          if not dl_url:
-              print("::error::No download link")
-              sys.exit(1)
-
-          vid_match = re.search(r'(?:v=|youtu\.be/)([a-zA-Z0-9_-]{11})', URL)
-          vid = vid_match[1] if vid_match else "video"
-
-          clean = re.sub(r'[^a-zA-Z0-9\-_()\[\]]', '_', title.replace(' ', '_'))
-          clean = re.sub(r'_+', '_', clean).strip('_')[:70] or vid
-          fname = f"{clean}_{vid}_{QUAL}.{FMT}"
-
-          with open(".download_info", "w") as f:
-              f.write(f"{dl_url}\n{fname}\n{title}")
-
-          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
-              f.write(f"filename={fname}\n")
-              f.write(f"title={title}\n")
-              f.write(f"actual_quality={QUAL}\n")
-          EOF
-        env:
-          INPUT_URL:     ${{ github.event.inputs.video_url }}
-          INPUT_FORMAT:  ${{ github.event.inputs.output_format == 'mp3 (audio only)' && 'mp3' || 'mp4' }}
-
-      - name: 📥 Download File
-        run: |
-          DL_URL=$(head -1 .download_info)
-          FILENAME=$(sed -n '2p' .download_info)
           mkdir -p release_files
-          curl -L --fail --progress-bar -o "release_files/$FILENAME" "$DL_URL"
 
-      - name: ✂️ Split Large File (if needed)
-        run: |
-          FILENAME="${{ steps.retrieve.outputs.filename }}"
-          THRESH_MB="${{ github.event.inputs.max_part_mb }}"
-          [[ "$THRESH_MB" -le 0 || "$THRESH_MB" -gt 1900 ]] && THRESH_MB=1800
-          FILESIZE=$(stat -c%s "release_files/$FILENAME" || echo 0)
-          THRESH_BYTES=$((THRESH_MB * 1024 * 1024))
-
-          if [ "$FILESIZE" -gt "$THRESH_BYTES" ]; then
-            BASE="${FILENAME%.*}"
-            cd release_files
-            zip -r -s "${THRESH_MB}m" "${BASE}.zip" "./$FILENAME"
-            rm "$FILENAME"
-            cd ..
+          if [ "$FORMAT_INPUT" = "mp3 (audio only)" ]; then
+            FORMAT="mp3"
+            QUALITY="192"
+          else
+            FORMAT="mp4"
+            QUALITY="480"
           fi
 
-      - name: 🧹 Remove previous downloads from repo
+          echo "Downloading..."
+          echo "URL: $URL"
+          echo "FORMAT: $FORMAT"
+
+          python3 main.py "$URL" "$QUALITY"
+
+          FILE=$(find . -maxdepth 1 \( -name "*.mp4" -o -name "*.mp3" \) | head -n 1)
+
+          if [ -z "$FILE" ]; then
+            echo "::error::Download failed"
+            exit 1
+          fi
+
+          BASENAME=$(basename "$FILE")
+
+          mv "$FILE" "release_files/$BASENAME"
+
+          echo "filename=$BASENAME" >> $GITHUB_OUTPUT
+          echo "actual_quality=${QUALITY}" >> $GITHUB_OUTPUT
+
+      # ✅ FIXES "[[: not found"
+      - name: ✂️ Split Large File (if needed)
+        shell: bash
+        run: |
+          FILENAME="${{ steps.download.outputs.filename }}"
+          THRESH_MB="${{ github.event.inputs.max_part_mb }}"
+
+          if [ -z "$THRESH_MB" ] || [ "$THRESH_MB" -le 0 ] || [ "$THRESH_MB" -gt 1900 ]; then
+            THRESH_MB=90
+          fi
+
+          FILESIZE=$(stat -c%s "release_files/$FILENAME")
+          THRESH_BYTES=$((THRESH_MB * 1024 * 1024))
+
+          echo "File size: $FILESIZE bytes"
+
+          if [ "$FILESIZE" -gt "$THRESH_BYTES" ]; then
+            echo "Splitting zip..."
+
+            BASE="${FILENAME%.*}"
+
+            cd release_files
+
+            zip -r -s "${THRESH_MB}m" "${BASE}.zip" "$FILENAME"
+
+            rm "$FILENAME"
+
+            cd ..
+          else
+            echo "No split needed"
+          fi
+
+      # ✅ Clean previous files
+      - name: 🧹 Remove previous downloads
         if: github.event.inputs.upload_method == 'repository (push to repo)'
+        shell: bash
         run: |
           mkdir -p downloads
           rm -rf downloads/*
 
+      # ✅ Push to repository
       - name: 📤 Push to Repository
         if: github.event.inputs.upload_method == 'repository (push to repo)'
+        shell: bash
         run: |
-          git config user.name  "github-actions[bot]"
+          git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+
           mkdir -p downloads
+
           mv release_files/* downloads/
+
           git add downloads/
-          git commit -m "⬇️ YouTube: ${{ steps.retrieve.outputs.filename }} [skip ci]" || echo "Nothing to commit"
+
+          git commit -m "⬇️ YouTube Download [skip ci]" || echo "Nothing to commit"
+
           git push
 
+      # ✅ Upload to Releases
       - name: 📤 Upload to GitHub Releases
         if: github.event.inputs.upload_method == 'release (GitHub Releases)'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.inputs.release_tag != '' && github.event.inputs.release_tag || format('yt-{0}', github.run_number) }}
-          name: ${{ format('YouTube - {0}', steps.retrieve.outputs.filename) }}
-          body: |
-            **📽️ YouTube Download**
 
-            **Title:** ${{ steps.retrieve.outputs.title }}
-            **Original Link:** ${{ github.event.inputs.video_url }}
-            **Quality:** ${{ steps.retrieve.outputs.actual_quality }}
-            **Format:** ${{ github.event.inputs.output_format }}
+          name: YouTube Download
+
+          body: |
+            📽️ YouTube Download
+
+            Original Link:
+            ${{ github.event.inputs.video_url }}
+
+            Quality:
+            ${{ steps.download.outputs.actual_quality }}
+
+            Format:
+            ${{ github.event.inputs.output_format }}
+
           files: release_files/*
           token: ${{ secrets.GITHUB_TOKEN }}
 
+      # ✅ Cleanup
       - name: 🧹 Cleanup
         if: always()
-        run: rm -rf release_files .download_info || true
+        shell: bash
+        run: |
+          rm -rf release_files || true
