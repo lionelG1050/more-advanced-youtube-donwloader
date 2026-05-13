@@ -1,32 +1,37 @@
 name: Build Docker Image
 
 on:
-  push:
-    branches:
-      - main
+  workflow_dispatch:
 
 permissions:
-  packages: write
   contents: read
+  packages: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      # THIS STEP FIXES THE "not in a git directory" ERROR
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Login to GHCR
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
-          username: ${{ github.actor }}
+          username: lionelg1050
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and Push
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          push: true
-          tags: ghcr.io/lionelg1050/youtube-downloader:latest
+      - name: Build Docker image
+        run: |
+          docker build -t ghcr.io/lionelg1050/youtube-downloader:latest .
+
+      - name: Push Docker image
+        run: |
+          docker push ghcr.io/lionelg1050/youtube-downloader:latest
